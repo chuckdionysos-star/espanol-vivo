@@ -652,7 +652,29 @@ function startMic(inputEl, statusEl, lang='es-ES', onFinal) {
   if (statusEl) statusEl.classList.add('on');
 }
 
-const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim()
+  .replace(/[¿¡]/g,'').replace(/\s+/g,' ');
+
+// Fuzzy match: allow small differences (for voice recognition errors)
+function fuzzyMatch(input, target) {
+  const a = norm(input), b = norm(target);
+  if (a === b) return true;
+  // Check if all words of target are contained in input or vice versa
+  const aWords = a.split(' '), bWords = b.split(' ');
+  // Single word: allow 1 char difference (Levenshtein)
+  if (bWords.length === 1) return levenshtein(a, b) <= 1;
+  // Multi word: check if main content words match
+  const matches = bWords.filter(w => a.includes(w) || levenshtein(w, aWords.find(aw=>Math.abs(aw.length-w.length)<=1)||'') <= 1);
+  return matches.length >= Math.ceil(bWords.length * 0.75);
+}
+
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({length:m+1}, (_,i) => Array.from({length:n+1}, (_,j) => i===0?j:j===0?i:0));
+  for (let i=1;i<=m;i++) for (let j=1;j<=n;j++)
+    dp[i][j] = a[i-1]===b[j-1] ? dp[i-1][j-1] : 1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);
+  return dp[m][n];
+}
 
 // ═══════════════════════════════════════════════════
 //  DASHBOARD
@@ -691,10 +713,11 @@ async function loadDashboard() {
 }
 
 // ═══════════════════════════════════════════════════
-//  VOKABELN + SRS
+//  VOKABELN – LERN-MODUS → TEST-MODUS
 // ═══════════════════════════════════════════════════
 let vocabWords = [];
 let vocabIdx = 0;
+let vocabMode = 'learn'; // 'learn' or 'test'
 let vocabAnswerShown = false;
 
 const VOCAB_THEMES = [
@@ -705,7 +728,7 @@ const VOCAB_THEMES = [
 ];
 
 async function loadVocab() {
-  vocabWords = []; vocabIdx = 0; vocabAnswerShown = false;
+  vocabWords = []; vocabIdx = 0; vocabMode = 'learn'; vocabAnswerShown = false;
   const card = document.getElementById('vocab-card');
   const done = document.getElementById('vocab-done');
   done.style.display='none';
@@ -735,33 +758,113 @@ function getFallbackVocab(theme) {
     {de:'die Miete',es:'el alquiler',type:'Nomen',example:'El alquiler está muy caro.',tip:"Von 'alquilar' = mieten"},
     {de:'suchen',es:'buscar',type:'Verb',example:'Busco trabajo en Barcelona.',tip:"Regelmäßiges -ar Verb"},
     {de:'kaufen',es:'comprar',type:'Verb',example:'Voy a comprar pan.',tip:"'ir a + Infinitiv' = Zukunft"},
+    {de:'leben',es:'vivir',type:'Verb',example:'Quiero vivir en España.',tip:"Regelmäßiges -ir Verb"},
+    {de:'die Straße',es:'la calle',type:'Nomen',example:'La calle está muy animada.',tip:"ll = 'j' oder 'y' aussprechen"},
+    {de:'teuer',es:'caro',type:'Adjektiv',example:'Este piso es muy caro.',tip:"Gegenteil: barato = günstig"},
+    {de:'günstig',es:'barato',type:'Adjektiv',example:'Este mercado es muy barato.',tip:"Gegenteil: caro = teuer"},
   ];
 }
 
+function updateVocabProgress() {
+  const total = vocabWords.length;
+  const pct = total>0 ? Math.round(vocabIdx/total*100) : 0;
+  document.getElementById('vocab-prog').style.width = pct+'%';
+  document.getElementById('vocab-prog-text').textContent = vocabIdx+'/'+total;
+}
+
+// ── LERN-MODUS ──────────────────────────────────────
 function renderVocabCard() {
   const card = document.getElementById('vocab-card');
   const done = document.getElementById('vocab-done');
+
+  if (vocabMode === 'learn') {
+    if (vocabIdx >= vocabWords.length) {
+      // All words seen → transition to test
+      card.style.display='block'; done.style.display='none';
+      card.innerHTML = `
+        <div style="text-align:center;padding:2.5rem 2rem;">
+          <div style="font-size:3rem;margin-bottom:.75rem;">🧠</div>
+          <div style="font-family:'Lora',serif;font-size:1.5rem;color:var(--navy);font-weight:700;margin-bottom:.5rem;">Alle Wörter gelernt!</div>
+          <div style="color:var(--muted);font-size:.9rem;margin-bottom:2rem;">Du hast alle ${vocabWords.length} Vokabeln gesehen. Jetzt testen wir dein Gedächtnis!</div>
+          <div style="display:flex;gap:.75rem;justify-content:center;flex-wrap:wrap;">
+            <button class="btn" onclick="startTestMode()">🎯 Jetzt testen!</button>
+            <button class="btn-sec" onclick="vocabIdx=0;renderVocabCard();">↩ Nochmal lernen</button>
+          </div>
+        </div>`;
+      return;
+    }
+    card.style.display='block'; done.style.display='none';
+    updateVocabProgress();
+    const w = vocabWords[vocabIdx];
+    card.innerHTML = `
+      <div style="text-align:center;padding:2rem 1.5rem;">
+        <div style="font-size:.68rem;color:var(--terr);letter-spacing:.15em;text-transform:uppercase;font-weight:600;margin-bottom:1rem;">
+          📖 LERN-MODUS &nbsp;·&nbsp; ${vocabIdx+1} von ${vocabWords.length}
+        </div>
+
+        <div style="background:var(--surface2);border-radius:16px;padding:1.75rem;margin-bottom:1.25rem;">
+          <div style="font-size:.75rem;color:var(--muted);margin-bottom:.3rem;">${w.type} · ${w.cat||''}</div>
+          <div style="font-family:'Lora',serif;font-size:2.2rem;font-weight:700;color:var(--muted);margin-bottom:.5rem;">${w.de}</div>
+          <div style="font-size:1rem;color:var(--muted);margin-bottom:1rem;">↓</div>
+          <div style="display:flex;align-items:center;justify-content:center;gap:.75rem;">
+            <div style="font-family:'Lora',serif;font-size:2.8rem;font-weight:700;color:var(--terr);line-height:1;">${w.es}</div>
+            <button class="speak-btn" onclick="speak('${w.es.replace(/'/g,"\\'")}')">🔊</button>
+          </div>
+        </div>
+
+        <div style="background:rgba(192,79,42,.06);border-left:3px solid var(--terr);border-radius:0 10px 10px 0;padding:.75rem 1rem;text-align:left;margin-bottom:1rem;">
+          <div style="font-size:.75rem;color:var(--muted);margin-bottom:.25rem;">Beispielsatz:</div>
+          <div style="font-style:italic;color:var(--ink);font-size:.9rem;">${w.example}
+            <button onclick="speak('${w.example.replace(/'/g,"\\'")}').valueOf()" style="background:none;border:none;cursor:pointer;font-size:.85rem;vertical-align:middle;">🔊</button>
+          </div>
+        </div>
+
+        ${w.tip ? `<div class="answer-tip" style="text-align:left;margin-bottom:1.25rem;">💡 ${w.tip}</div>` : ''}
+
+        <div style="display:flex;gap:.75rem;justify-content:center;flex-wrap:wrap;">
+          ${vocabIdx > 0 ? `<button class="btn-sec" onclick="vocabIdx--;renderVocabCard();">← Zurück</button>` : ''}
+          <button class="btn" onclick="vocabIdx++;renderVocabCard();">${vocabIdx < vocabWords.length-1 ? 'Weiter →' : 'Fertig lernen ✓'}</button>
+        </div>
+      </div>`;
+  } else {
+    renderTestCard();
+  }
+}
+
+// ── TEST-MODUS ──────────────────────────────────────
+function startTestMode() {
+  vocabMode = 'test';
+  vocabIdx = 0;
+  vocabAnswerShown = false;
+  // Shuffle words for the test
+  vocabWords = [...vocabWords].sort(() => Math.random() - 0.5);
+  renderTestCard();
+}
+
+function renderTestCard() {
+  const card = document.getElementById('vocab-card');
+  const done = document.getElementById('vocab-done');
+
   if (vocabIdx >= vocabWords.length) {
     card.style.display='none'; done.style.display='block';
-    document.getElementById('vocab-done-msg').textContent = `Alle ${vocabWords.length} Vokabeln erledigt!`;
+    document.getElementById('vocab-done-msg').textContent = `Alle ${vocabWords.length} Vokabeln getestet!`;
     return;
   }
   card.style.display='block'; done.style.display='none';
+  updateVocabProgress();
   const w = vocabWords[vocabIdx];
   const srs = state.srsCards[w.es] || {level:0,reviews:0};
-  const pct = Math.round(vocabIdx/vocabWords.length*100);
-  document.getElementById('vocab-prog').style.width = pct+'%';
-  document.getElementById('vocab-prog-text').textContent = vocabIdx+'/'+vocabWords.length;
   vocabAnswerShown = false;
 
   card.innerHTML = `
-    <div class="vocab-card">
-      <div class="vocab-stage">${srs.level===0?'Neue Vokabel':'Wiederholung – Stufe '+srs.level}</div>
-      <div style="display:flex;align-items:center;justify-content:center;gap:.75rem;margin-bottom:.25rem;">
-        <div class="vocab-word">${w.de}</div>
-        <button class="speak-btn" onclick="speak('${w.es.replace(/'/g,"\\'")}')">🔊</button>
+    <div style="text-align:center;padding:2rem 1.5rem;">
+      <div style="font-size:.68rem;color:var(--success);letter-spacing:.15em;text-transform:uppercase;font-weight:600;margin-bottom:1rem;">
+        🎯 TEST-MODUS &nbsp;·&nbsp; ${vocabIdx+1} von ${vocabWords.length}
       </div>
-      <div class="vocab-type">${w.type}</div>
+      <div style="font-size:.72rem;color:var(--muted);margin-bottom:.3rem;">${srs.level===0?'Neue Vokabel':'Wiederholung – Stufe '+srs.level}</div>
+
+      <div style="font-family:'Lora',serif;font-size:3rem;font-weight:700;color:var(--navy);line-height:1;margin-bottom:.25rem;">${w.de}</div>
+      <div style="font-size:.8rem;color:var(--terr);margin-bottom:1.75rem;">${w.type}</div>
 
       <div class="voice-row" id="vocab-input-row">
         <input class="inp" id="vocab-input" placeholder="Spanische Übersetzung eingeben…"
@@ -770,7 +873,7 @@ function renderVocabCard() {
           onkeydown="if(event.key==='Enter')checkVocabInput()">
         <button class="mic-btn" id="vocab-mic" onclick="toggleVocabMic()">🎙️</button>
       </div>
-      <div style="font-size:.74rem;color:var(--muted);margin-bottom:.75rem;" id="vocab-mic-status">Tippe oder sprich auf Spanisch 🎙️</div>
+      <div style="font-size:.74rem;color:var(--muted);margin:.4rem 0 .9rem;" id="vocab-mic-status">Tippe oder sprich auf Spanisch 🎙️</div>
 
       <div style="display:flex;gap:.5rem;justify-content:center;flex-wrap:wrap;">
         <button class="btn" onclick="checkVocabInput()">Prüfen ✓</button>
@@ -778,8 +881,10 @@ function renderVocabCard() {
       </div>
 
       <div id="vocab-answer-area" style="display:none;" class="answer-reveal">
-        <div class="answer-es" id="vocab-answer-es">${w.es}</div>
-        <div class="answer-ex" id="vocab-answer-ex">„${w.example}"</div>
+        <div class="answer-es">${w.es}
+          <button class="speak-btn" style="vertical-align:middle;margin-left:.5rem;" onclick="speak('${w.es.replace(/'/g,"\\'")}')">🔊</button>
+        </div>
+        <div class="answer-ex">„${w.example}"</div>
         ${w.tip?`<div class="answer-tip">💡 ${w.tip}</div>`:''}
         <div style="font-size:.8rem;color:var(--muted);margin-bottom:.75rem;">Wie gut wusstest du es?</div>
         <div class="srs-row">
@@ -789,8 +894,7 @@ function renderVocabCard() {
           <button class="srs-btn" style="background:#d0e8f8;color:#1a6090;" onclick="vocabRate(3)">🚀 Leicht</button>
         </div>
       </div>
-    </div>
-  `;
+    </div>`;
 }
 
 function checkVocabInput() {
@@ -799,7 +903,7 @@ function checkVocabInput() {
   const val = inputEl.value.trim();
   if (!val) return;
   const w = vocabWords[vocabIdx];
-  const ok = norm(val) === norm(w.es);
+  const ok = fuzzyMatch(val, w.es);
   inputEl.className = 'inp '+(ok?'ok':'err');
   if (ok) { addXP(10); addCorrect(); }
   speak(w.es);
@@ -824,10 +928,13 @@ function vocabRate(q) {
   else addXP(2);
   saveState();
   vocabIdx++;
-  renderVocabCard();
+  renderTestCard();
 }
 
-function restartVocab() { vocabIdx=0; renderVocabCard(); }
+function restartVocab() {
+  vocabIdx=0; vocabMode='learn';
+  renderVocabCard();
+}
 
 function toggleVocabMic() {
   const micBtn = document.getElementById('vocab-mic');
@@ -835,11 +942,11 @@ function toggleVocabMic() {
   const status = document.getElementById('vocab-mic-status');
   if (isListening) { recognition?.stop(); micBtn?.classList.remove('on'); return; }
   micBtn?.classList.add('on');
-  if (status) status.textContent = '🎙️ Höre zu…';
-  startMic(inputEl, null, 'es-ES', ()=>{
-    micBtn?.classList.remove('on');
-    if (status) status.textContent = 'Tippe oder sprich auf Spanisch 🎙️';
-    setTimeout(checkVocabInput,200);
+  if (status) status.textContent = "🎙️ Sprich das spanische Wort…";
+  startMic(inputEl, null, "es-ES", ()=>{
+    micBtn?.classList.remove("on");
+    if (status) status.textContent = "✅ Erkannt – wird geprüft…";
+    setTimeout(checkVocabInput, 300);
   });
 }
 
@@ -944,7 +1051,7 @@ function checkGrammarQuiz() {
   let correct = 0;
   const inputs = document.querySelectorAll('#grammar-quiz input');
   inputs.forEach((inp,i)=>{
-    const ok = norm(inp.value) === norm(inp.dataset.answer);
+    const ok = fuzzyMatch(inp.value, inp.dataset.answer);
     inp.className = 'inp '+(ok?'ok':'err');
     const fb = document.getElementById('gqf-'+i);
     if (fb) { fb.textContent = ok?'✓ Richtig!':'✗ Richtig: '+inp.dataset.answer; fb.className='quiz-fb '+(ok?'ok':'err'); }
@@ -1029,7 +1136,7 @@ function checkListen() {
   const inp = document.getElementById('listen-input');
   const fb = document.getElementById('listen-fb');
   if (!inp||!fb||!listenWord) return;
-  const ok = norm(inp.value) === norm(listenWord.word);
+  const ok = fuzzyMatch(inp.value, listenWord.word);
   inp.className = 'inp '+(ok?'ok':'err');
   fb.innerHTML = ok
     ? `<div class="fb-box fb-ok">✓ Richtig! „${listenWord.word}" = ${listenWord.translation}</div>`
